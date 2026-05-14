@@ -7,6 +7,9 @@ import sglue "../lib/sokol/glue"
 import slog "../lib/sokol/log"
 import "core:fmt"
 import "core:image"
+import "core:math/linalg/glsl"
+
+MAX_SPRITES :: 1024
 
 // the core struct holding all GPU state.
 Renderer :: struct {
@@ -24,6 +27,17 @@ Renderer :: struct {
 	viewport_bind:                 sg.Bindings,
 	viewport_vertex_buf:           sg.Buffer,
 
+	// batch buffer
+	batch_vertices:                [dynamic]Vertex, // CPU-side accumulation
+	batch_indices:                 [dynamic]u16, // CPU-side accumulation
+	vertex_buf:                    sg.Buffer, // GPU buffer for vertices
+	index_buf:                     sg.Buffer, // GPU buffer for indices
+	current_texture:               sg.Image, // for batching by texture
+	current_texture_view:          sg.View, // view of the tex
+	white_texture:                 sg.Image, // 1x1 white pixel fallback
+	checkerboard_texture:          sg.Image, // test texture
+	batch_count:                   int, // number of sprites in current batch
+
 	// settings
 	virtual_width, virtual_height: i32,
 }
@@ -38,7 +52,7 @@ renderer_init :: proc(r: ^Renderer, virtual_w, virtual_h: i32) {
 	assert(backend != .DUMMY, "Failed to initialize sokol_gfx backend")
 	fmt.println("sokol_gfx initialized with backend:", backend)
 
-	// create the default shader and pipeline
+	// default shader and pipeline
 	r.pip = sg.make_pipeline(
 		{
 			shader = sg.make_shader(default_shader_desc(backend)),
@@ -54,7 +68,18 @@ renderer_init :: proc(r: ^Renderer, virtual_w, virtual_h: i32) {
 		},
 	)
 
-	// create a test texture (checkerboard) and its sampler
+	// ... and the sampler
+	r.bind.samplers[SMP_smp] = sg.make_sampler(
+		{
+			min_filter = .NEAREST,
+			mag_filter = .NEAREST,
+			wrap_u = .CLAMP_TO_EDGE,
+			wrap_v = .CLAMP_TO_EDGE,
+			label = "default-sampler",
+		},
+	)
+
+	// checkerboard
 	TEX_W :: 8
 	TEX_H :: 8
 	pixels: [TEX_W * TEX_H]u32
@@ -68,58 +93,56 @@ renderer_init :: proc(r: ^Renderer, virtual_w, virtual_h: i32) {
 			}
 		}
 	}
-
-	r.bind.views[VIEW_tex] = sg.make_view(
+	r.checkerboard_texture = sg.make_image(
 		{
-			texture = {
-				image = sg.make_image(
-					{
-						width = TEX_W,
-						height = TEX_H,
-						pixel_format = .RGBA8,
-						data = {mip_levels = {0 = {ptr = &pixels, size = size_of(pixels)}}},
-					},
-				),
-			},
+			width = TEX_W,
+			height = TEX_H,
+			pixel_format = .RGBA8,
+			data = {mip_levels = {0 = {ptr = &pixels, size = size_of(pixels)}}},
 		},
 	)
 
-	r.bind.samplers[SMP_smp] = sg.make_sampler(
+	// default white tex
+	white_pixel: u32 = 0xFFFFFFFF
+	r.white_texture = sg.make_image(
 		{
-			min_filter = .NEAREST,
-			mag_filter = .NEAREST,
-			wrap_u = .CLAMP_TO_EDGE,
-			wrap_v = .CLAMP_TO_EDGE,
-			label = "default-sampler",
+			width = 1,
+			height = 1,
+			pixel_format = .RGBA8,
+			data = {mip_levels = {0 = {ptr = &white_pixel, size = size_of(white_pixel)}}},
 		},
 	)
 
-	QUAD_SIZE :: 128
-	left := f32(virtual_w / 2 - QUAD_SIZE / 2)
-	right := f32(virtual_w / 2 + QUAD_SIZE / 2)
-	top := f32(virtual_h / 2 - QUAD_SIZE / 2)
-	bottom := f32(virtual_h / 2 + QUAD_SIZE / 2)
+	// cpu buffer
+	r.batch_vertices = make([dynamic]Vertex, 0, MAX_SPRITES * 4)
+	r.batch_indices = make([dynamic]u16, 0, MAX_SPRITES * 6)
 
-	quad_vertices := [?]Vertex {
-		{left, top, 0.5, 1.0, 0xffffffff, 0.0, 0.0},
-		{right, top, 0.5, 1.0, 0xffffffff, 1.0, 0.0},
-		{right, bottom, 0.5, 1.0, 0xffffffff, 1.0, 1.0},
-		{left, bottom, 0.5, 1.0, 0xffffffff, 0.0, 1.0},
+	// gpu buffer
+	r.vertex_buf = sg.make_buffer(
+		{
+			usage = {dynamic_update = true},
+			size = MAX_SPRITES * 4 * size_of(Vertex),
+			label = "batch-vertex-buf",
+		},
+	)
+	r.index_buf = sg.make_buffer(
+		{
+			usage = {index_buffer = true, dynamic_update = true},
+			size = MAX_SPRITES * 6 * size_of(u16),
+			label = "batch-index-buf",
+		},
+	)
+
+	// make first texture invalid to trigger a texture update
+	r.current_texture = {
+		id = sg.INVALID_ID,
 	}
-	r.bind.vertex_buffers[0] = sg.make_buffer(
-		{data = {ptr = &quad_vertices, size = size_of(quad_vertices)}, label = "quad-vertices"},
-	)
+	r.current_texture_view = {
+		id = sg.INVALID_ID,
+	}
+	r.batch_count = 0
 
-	quad_indices := [?]u16{0, 1, 2, 0, 2, 3}
-	r.bind.index_buffer = sg.make_buffer(
-		{
-			usage = {index_buffer = true},
-			data = {ptr = &quad_indices, size = size_of(quad_indices)},
-			label = "quad-indices",
-		},
-	)
-
-	// create the offscreen render target
+	// offscreen render target
 	r.offscreen_img = sg.make_image(
 		{
 			usage = {color_attachment = true},
@@ -128,7 +151,6 @@ renderer_init :: proc(r: ^Renderer, virtual_w, virtual_h: i32) {
 			pixel_format = .RGBA8,
 		},
 	)
-
 	r.offscreen_pass = {
 		action = {
 			colors = {
@@ -140,7 +162,7 @@ renderer_init :: proc(r: ^Renderer, virtual_w, virtual_h: i32) {
 		},
 	}
 
-	// create the viewport display pipeline
+	// viewport display
 	viewport_vertices := [4]VertexViewport {
 		{-1, 1, 0, 0},
 		{1, 1, 1, 0},
@@ -155,7 +177,6 @@ renderer_init :: proc(r: ^Renderer, virtual_w, virtual_h: i32) {
 			usage = {dynamic_update = true},
 		},
 	)
-
 	r.viewport_bind.vertex_buffers[0] = r.viewport_vertex_buf
 	r.viewport_bind.index_buffer = sg.make_buffer(
 		{
@@ -167,7 +188,6 @@ renderer_init :: proc(r: ^Renderer, virtual_w, virtual_h: i32) {
 	r.viewport_bind.samplers[SMP_smp] = sg.make_sampler(
 		{min_filter = .NEAREST, mag_filter = .NEAREST},
 	)
-
 	r.viewport_pip = sg.make_pipeline(
 		{
 			shader = sg.make_shader(viewport_shader_desc(backend)),
@@ -181,7 +201,7 @@ renderer_init :: proc(r: ^Renderer, virtual_w, virtual_h: i32) {
 		},
 	)
 
-	// default pass action for the final display
+	// and the default pass
 	r.pass_action = {
 		colors = {0 = {load_action = .CLEAR, clear_value = {r = 0.1, g = 0.1, b = 0.15, a = 1.0}}},
 	}
@@ -216,14 +236,22 @@ renderer_update_viewport :: proc(r: ^Renderer) {
 }
 
 // called at the start of each frame, sets up the offscreen pass
-renderer_begin :: proc(r: ^Renderer) {
+renderer_begin :: proc(r: ^Renderer, cam: c.Camera2D) {
 	sg.begin_pass(r.offscreen_pass)
 	sg.apply_pipeline(r.pip)
-	sg.apply_bindings(r.bind)
+
+	// upload view-projection
+	vp := c.camera_projection(cam)
+	vs_params := Vs_Params {
+		mvp = vp,
+	}
+	sg.apply_uniforms(UB_vs_params, {ptr = &vs_params, size = size_of(vs_params)})
 }
 
 // called at the end of each frame, flushes the offscreen pass and composites to the window
 renderer_end :: proc(r: ^Renderer) {
+	renderer_flush(r)
+
 	sg.end_pass()
 
 	// composite the offscreen texture to the screen
@@ -238,4 +266,102 @@ renderer_end :: proc(r: ^Renderer) {
 
 renderer_shutdown :: proc(r: ^Renderer) {
 	sg.shutdown()
+}
+
+renderer_draw_sprite :: proc(
+	r: ^Renderer,
+	texture: sg.Image,
+	transform: ^c.Transform2D,
+	color: u32,
+) {
+	// maxed out batch -> flush
+	if r.batch_count >= MAX_SPRITES {
+		renderer_flush(r)
+	}
+
+	// new texture id -> flush
+	if texture.id != r.current_texture.id {
+		renderer_flush(r)
+		r.current_texture = texture
+		r.current_texture_view = sg.make_view({texture = {image = texture}})
+	}
+
+	// world matrix for sprite
+	mat := c.transform_matrix(transform)
+
+	// quad in local space
+	corners := [4]glsl.vec4 {
+		{0, 0, 0, 1}, // top-left
+		{1, 0, 0, 1}, // top-right
+		{1, 1, 0, 1}, // bottom-right
+		{0, 1, 0, 1}, // bottom-left
+	}
+
+	uvs := [4][2]f32 {
+		{0, 0}, // top-left
+		{1, 0}, // top-right
+		{1, 1}, // bottom-right
+		{0, 1}, // bottom-left
+	}
+
+	base_index := u16(len(r.batch_vertices))
+
+	for i in 0 ..< 4 {
+		world_pos := mat * corners[i]
+		append(
+			&r.batch_vertices,
+			Vertex {
+				x     = world_pos.x,
+				y     = world_pos.y,
+				z     = 0.5, // mid-depth for 2D
+				w     = 1.0,
+				color = color,
+				u     = uvs[i].x,
+				v     = uvs[i].y,
+			},
+		)
+	}
+
+	// indices for quad -> two triangles -> 0-1-2, 0-2-3
+	append(
+		&r.batch_indices,
+		base_index + 0,
+		base_index + 1,
+		base_index + 2,
+		base_index + 0,
+		base_index + 2,
+		base_index + 3,
+	)
+
+	r.batch_count += 1
+}
+
+renderer_flush :: proc(r: ^Renderer) {
+	if r.batch_count == 0 {
+		return
+	}
+
+	// upload to the GPU
+	sg.update_buffer(
+		r.vertex_buf,
+		{ptr = raw_data(r.batch_vertices[:]), size = len(r.batch_vertices) * size_of(Vertex)},
+	)
+	sg.update_buffer(
+		r.index_buf,
+		{ptr = raw_data(r.batch_indices[:]), size = len(r.batch_indices) * size_of(u16)},
+	)
+
+	// binding buffer and texture
+	r.bind.vertex_buffers[0] = r.vertex_buf
+	r.bind.index_buffer = r.index_buf
+	r.bind.views[VIEW_tex] = r.current_texture_view
+	sg.apply_bindings(r.bind)
+
+	// draw it all
+	sg.draw(0, u32(len(r.batch_indices)), 1)
+
+	// prep up for next batch
+	clear(&r.batch_vertices)
+	clear(&r.batch_indices)
+	r.batch_count = 0
 }

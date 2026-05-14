@@ -1,14 +1,10 @@
 package engine
 
 import c "../core"
-import sapp "../lib/sokol/app"
 import sg "../lib/sokol/gfx"
-import sglue "../lib/sokol/glue"
-import slog "../lib/sokol/log"
 import r "../render"
 import "base:runtime"
 import "core:fmt"
-import "core:image"
 import "core:math/linalg/glsl"
 
 MvContext :: struct {
@@ -24,21 +20,18 @@ init :: proc(ctx: ^MvContext) {
 
 frame :: proc(ctx: ^MvContext) {
 	r.renderer_update_viewport(&ctx.renderer)
+	r.renderer_begin(&ctx.renderer, ctx.camera)
 
-	r.renderer_begin(&ctx.renderer)
-
-	// drawing the game to offscreen
-	vp := c.camera_projection(ctx.camera)
-	model := glsl.identity(glsl.mat4)
-	vs_params := r.Vs_Params {
-		mvp = vp * model,
-	}
-
-	sg.apply_uniforms(r.UB_vs_params, {ptr = &vs_params, size = size_of(vs_params)})
-	sg.draw(0, 6, 1)
+	// draw the checkerboard using the sprite API
+	transform := c.transform_make({VIRTUAL_W / 2 - 64, VIRTUAL_H / 2 - 64}, {128, 128}, 0)
+	r.renderer_draw_sprite(
+		&ctx.renderer,
+		ctx.renderer.checkerboard_texture,
+		&transform,
+		0xFFFFFFFF,
+	)
 
 	r.renderer_end(&ctx.renderer)
-
 }
 
 cleanup :: proc(ctx: ^MvContext) {
