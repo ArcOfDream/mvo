@@ -7,7 +7,7 @@ import sglue "../lib/sokol/glue"
 import slog "../lib/sokol/log"
 import "core:fmt"
 import "core:image"
-import "core:math/linalg/glsl"
+import m "core:math/linalg/glsl"
 
 MAX_SPRITES :: 1024
 
@@ -290,7 +290,7 @@ renderer_draw_sprite :: proc(
 	mat := c.transform_matrix(transform)
 
 	// quad in local space
-	corners := [4]glsl.vec4 {
+	corners := [4]m.vec4 {
 		{0, 0, 0, 1}, // top-left
 		{1, 0, 0, 1}, // top-right
 		{1, 1, 0, 1}, // bottom-right

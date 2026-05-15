@@ -2,7 +2,7 @@ package engine
 
 import c "../core"
 
-Node_Vtable :: struct {
+NodeVTable :: struct {
 	init:      proc(self: rawptr),
 	ready:     proc(self: rawptr),
 	update:    proc(self: rawptr, dt: f32),
@@ -17,7 +17,8 @@ Node :: struct {
 	owner:            ^Node,
 
 	// called through
-	vtable:           ^Node_Vtable,
+	vtable:           ^NodeVTable,
+	vtable_override:  ^NodeVTable,
 
 	// instance data
 	transform:        c.Transform2D,
@@ -26,16 +27,16 @@ Node :: struct {
 	z_as_relative:    bool,
 	visible:          bool,
 	name:             string,
-	process_flags:    Process_Flags,
+	process_flags:    ProcessFlags,
 }
 
-Process_Flags :: bit_set[Process_Flag]
-Process_Flag :: enum {
+ProcessFlags :: bit_set[ProcessFlag]
+ProcessFlag :: enum {
 	update,
 	draw,
 }
 
-node_default_vtable := &Node_Vtable {
+_node_vtable := NodeVTable {
 	init = proc(self: rawptr) {},
 	ready = proc(self: rawptr) {},
 	update = proc(self: rawptr, dt: f32) {},
@@ -45,7 +46,7 @@ node_default_vtable := &Node_Vtable {
 
 node_new :: proc(name: string) -> ^Node {
 	n := new(Node)
-	n.vtable = node_default_vtable
+	n.vtable = &_node_vtable
 	n.name = name
 	n.transform = c.transform_default()
 	n.global_transform = c.transform_default()
@@ -54,21 +55,33 @@ node_new :: proc(name: string) -> ^Node {
 	return n
 }
 
+node_vtable :: proc() -> ^NodeVTable {
+	vt := new(NodeVTable)
+	vt^ = _node_vtable
+	return vt
+}
+
 node_traverse_update :: proc(node: ^Node, dt: f32) {
-    if node.parent != nil {
-        node.global_transform = c.transform_compose(
-            &node.parent.global_transform,
-            &node.transform,
-        )
-    } else {
-        node.global_transform = node.transform
-    }
+	if node.parent != nil {
+		node.global_transform = c.transform_compose(&node.parent.global_transform, &node.transform)
+	} else {
+		node.global_transform = node.transform
+	}
 
-    for child in node.children {
-        node_traverse_update(child, dt)
-    }
+	if .update in node.process_flags {
+		node.vtable.update(rawptr(node), dt)
+	}
 
-    if .update in node.process_flags {
-        node.vtable.update(rawptr(node), dt)
-    }
+	for child in node.children {
+		node_traverse_update(child, dt)
+	}
+}
+
+node_traverse_draw :: proc(node: ^Node, ctx: ^SpriteDrawContext) {
+	if node.visible && .draw in node.process_flags {
+		node.vtable.draw(rawptr(node), rawptr(ctx))
+	}
+	for child in node.children {
+		node_traverse_draw(child, ctx)
+	}
 }
