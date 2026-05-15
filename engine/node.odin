@@ -61,6 +61,54 @@ node_vtable :: proc() -> ^NodeVTable {
 	return vt
 }
 
+node_call_init :: proc(node: ^Node) {
+	if node.vtable_override != nil && node.vtable_override.init != nil {
+		node.vtable_override.init(rawptr(node))
+	} else if node.vtable.init != nil {
+		node.vtable.init(rawptr(node))
+	}
+}
+
+node_call_ready :: proc(node: ^Node) {
+	if node.vtable_override != nil && node.vtable_override.ready != nil {
+		node.vtable_override.ready(rawptr(node))
+	} else if node.vtable.ready != nil {
+		node.vtable.ready(rawptr(node))
+	}
+}
+
+node_call_update :: proc(node: ^Node, dt: f32) {
+	if node.vtable_override != nil && node.vtable_override.update != nil {
+		node.vtable_override.update(rawptr(node), dt)
+	} else if node.vtable.update != nil {
+		node.vtable.update(rawptr(node), dt)
+	}
+}
+
+node_call_draw :: proc(node: ^Node, cmd_buf: rawptr) {
+	if node.vtable_override != nil && node.vtable_override.draw != nil {
+		node.vtable_override.draw(rawptr(node), cmd_buf)
+	} else if node.vtable.draw != nil {
+		node.vtable.draw(rawptr(node), cmd_buf)
+	}
+}
+
+node_call_exit_tree :: proc(node: ^Node) {
+	if node.vtable_override != nil && node.vtable_override.exit_tree != nil {
+		node.vtable_override.exit_tree(rawptr(node))
+	} else if node.vtable.exit_tree != nil {
+		node.vtable.exit_tree(rawptr(node))
+	}
+}
+
+node_get_override :: proc(node: ^Node) -> ^NodeVTable {
+    if node.vtable_override == nil {
+        node.vtable_override = new(NodeVTable)
+        node.vtable_override^ = node.vtable^
+    }
+    return node.vtable_override
+}
+
 node_traverse_update :: proc(node: ^Node, dt: f32) {
 	if node.parent != nil {
 		node.global_transform = c.transform_compose(&node.parent.global_transform, &node.transform)
@@ -69,7 +117,7 @@ node_traverse_update :: proc(node: ^Node, dt: f32) {
 	}
 
 	if .update in node.process_flags {
-		node.vtable.update(rawptr(node), dt)
+		node_call_update(node, dt)
 	}
 
 	for child in node.children {
@@ -79,7 +127,7 @@ node_traverse_update :: proc(node: ^Node, dt: f32) {
 
 node_traverse_draw :: proc(node: ^Node, ctx: ^SpriteDrawContext) {
 	if node.visible && .draw in node.process_flags {
-		node.vtable.draw(rawptr(node), rawptr(ctx))
+		node_call_draw(node, rawptr(ctx))
 	}
 	for child in node.children {
 		node_traverse_draw(child, ctx)
